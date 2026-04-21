@@ -18,8 +18,7 @@ LEDGER_PATH = os.path.join(os.path.dirname(__file__), "ledger.json")
 BINANCE_BASE = "https://api.binance.com/api/v3"
 
 POSITION_SIZE_PCT = 0.50   # Use 50% of capital per trade
-STOP_LOSS_PCT = 0.05       # Close if price falls 5% from entry
-TAKE_PROFIT_PCT = 0.08     # Close if price rises 8% from entry
+MIN_RR_RATIO = 2.0         # Minimum reward:risk ratio — risk $1, expect $2
 BUY_CONFIDENCE_MIN = 65    # Minimum confidence to open a long
 SELL_CONFIDENCE_MIN = 60   # Minimum confidence to close on SELL signal
 
@@ -44,7 +43,25 @@ def save_ledger(ledger: dict):
         json.dump(ledger, f, indent=2)
 
 
-def open_position(ledger: dict, price: float, signal: dict):
+def compute_rr(price: float, signal: dict) -> tuple[float, float, float, float]:
+    """Compute risk, reward, and R:R ratio from signal's support/resistance levels.
+    Returns (risk_per_unit, reward_per_unit, rr_ratio, stop_loss, take_profit)."""
+    support = signal.get("key_level_support", 0)
+    resistance = signal.get("key_level_resistance", 0)
+
+    risk = price - support
+    reward = resistance - price
+
+    if risk <= 0 or reward <= 0:
+        return 0, 0, 0, 0, 0
+
+    rr_ratio = reward / risk
+    stop_loss = round(support, 2)
+    take_profit = round(resistance, 2)
+    return risk, reward, rr_ratio, stop_loss, take_profit
+
+
+def open_position(ledger: dict, price: float, signal: dict, stop_loss: float, take_profit: float):
     capital = ledger["capital"]
     size_usd = round(capital * POSITION_SIZE_PCT, 2)
     btc_amount = round(size_usd / price, 8)
@@ -55,8 +72,8 @@ def open_position(ledger: dict, price: float, signal: dict):
         "size_usd": size_usd,
         "btc_amount": btc_amount,
         "entry_time": datetime.now(timezone.utc).isoformat(),
-        "stop_loss_price": round(price * (1 - STOP_LOSS_PCT), 2),
-        "take_profit_price": round(price * (1 + TAKE_PROFIT_PCT), 2),
+        "stop_loss_price": stop_loss,
+        "take_profit_price": take_profit,
         "trade_id": trade_id,
     }
 
@@ -77,7 +94,7 @@ def open_position(ledger: dict, price: float, signal: dict):
     ledger["trades"].append(buy_record)
 
     print(f"  OPENED LONG: {btc_amount} BTC @ ${price:,.2f} (${size_usd:,.2f})")
-    print(f"  Stop-loss: ${position['stop_loss_price']:,.2f} | Take-profit: ${position['take_profit_price']:,.2f}")
+    print(f"  Stop-loss: ${stop_loss:,.2f} | Take-profit: ${take_profit:,.2f}")
 
 
 def close_position(ledger: dict, price: float, reason: str, signal: dict | None = None):
@@ -171,9 +188,15 @@ def main():
             if ledger["capital"] < 100:
                 print("\n  Insufficient capital to open position.")
             else:
+                risk, reward, rr_ratio, sl, tp = compute_rr(price, signal)
                 print(f"\n  BUY signal ({signal['confidence']}% confidence)")
-                open_position(ledger, price, signal)
-                action_taken = "BUY"
+                print(f"  R:R check — risk: ${risk:,.2f}, reward: ${reward:,.2f}, ratio: {rr_ratio:.2f}:1 (min {MIN_RR_RATIO:.0f}:1)")
+                if rr_ratio >= MIN_RR_RATIO:
+                    open_position(ledger, price, signal, sl, tp)
+                    action_taken = "BUY"
+                else:
+                    print(f"  REJECTED — R:R {rr_ratio:.2f}:1 below minimum {MIN_RR_RATIO:.0f}:1, skipping trade")
+                    action_taken = "RR_REJECTED"
         else:
             reason = f"signal={signal['signal']}, confidence={signal['confidence']}% (min {BUY_CONFIDENCE_MIN}%)"
             print(f"\n  No trade — {reason}")
