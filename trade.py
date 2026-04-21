@@ -18,9 +18,21 @@ LEDGER_PATH = os.path.join(os.path.dirname(__file__), "ledger.json")
 BINANCE_BASE = "https://api.binance.com/api/v3"
 
 POSITION_SIZE_PCT = 0.50   # Use 50% of capital per trade
-MIN_RR_RATIO = 2.0         # Minimum reward:risk ratio — risk $1, expect $2
 BUY_CONFIDENCE_MIN = 65    # Minimum confidence to open a long
 SELL_CONFIDENCE_MIN = 60   # Minimum confidence to close on SELL signal
+
+RR_TIERS = [
+    (85, 1.0),   # 85%+ confidence -> minimum 1:1 R:R
+    (75, 1.5),   # 75-84% confidence -> minimum 1.5:1 R:R
+    (0,  2.0),   # below 75% -> minimum 2:1 R:R
+]
+
+
+def min_rr_for_confidence(confidence: int) -> float:
+    for threshold, min_rr in RR_TIERS:
+        if confidence >= threshold:
+            return min_rr
+    return RR_TIERS[-1][1]
 
 
 def fetch_current_price() -> float:
@@ -189,13 +201,14 @@ def main():
                 print("\n  Insufficient capital to open position.")
             else:
                 risk, reward, rr_ratio, sl, tp = compute_rr(price, signal)
+                required_rr = min_rr_for_confidence(signal["confidence"])
                 print(f"\n  BUY signal ({signal['confidence']}% confidence)")
-                print(f"  R:R check — risk: ${risk:,.2f}, reward: ${reward:,.2f}, ratio: {rr_ratio:.2f}:1 (min {MIN_RR_RATIO:.0f}:1)")
-                if rr_ratio >= MIN_RR_RATIO:
+                print(f"  R:R check — risk: ${risk:,.2f}, reward: ${reward:,.2f}, ratio: {rr_ratio:.2f}:1 (min {required_rr:.1f}:1 for {signal['confidence']}% conf)")
+                if rr_ratio >= required_rr:
                     open_position(ledger, price, signal, sl, tp)
                     action_taken = "BUY"
                 else:
-                    print(f"  REJECTED — R:R {rr_ratio:.2f}:1 below minimum {MIN_RR_RATIO:.0f}:1, skipping trade")
+                    print(f"  REJECTED — R:R {rr_ratio:.2f}:1 below minimum {required_rr:.1f}:1, skipping trade")
                     action_taken = "RR_REJECTED"
         else:
             reason = f"signal={signal['signal']}, confidence={signal['confidence']}% (min {BUY_CONFIDENCE_MIN}%)"

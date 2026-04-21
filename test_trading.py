@@ -54,44 +54,68 @@ class TestRiskReward(unittest.TestCase):
         self.assertEqual(sl, 85000.0)
         self.assertEqual(tp, 100000.0)
 
-    def test_rr_below_minimum_rejects_trade(self):
-        """Signal with R:R < 2 should not open a position."""
+    def test_sliding_rr_high_confidence_accepts_1_to_1(self):
+        """85%+ confidence only needs 1:1 R:R."""
         ledger = make_ledger(capital=10000.0)
-        # support=88000, resistance=92000 -> risk=2000, reward=2000 -> R:R=1.0
-        signal = make_signal(sig="BUY", confidence=80, price=90000.0,
+        # risk=2000, reward=2000 -> R:R=1.0, confidence=90 -> min 1.0
+        signal = make_signal(sig="BUY", confidence=90, price=90000.0,
+                             support=88000.0, resistance=92000.0)
+        result = self._run_main(ledger, signal, 90000.0)
+        self.assertIsNotNone(result["position"])
+
+    def test_sliding_rr_mid_confidence_needs_1_5(self):
+        """75-84% confidence needs 1.5:1 R:R."""
+        ledger = make_ledger(capital=10000.0)
+        # risk=2000, reward=2000 -> R:R=1.0, confidence=78 -> min 1.5 -> REJECT
+        signal = make_signal(sig="BUY", confidence=78, price=90000.0,
                              support=88000.0, resistance=92000.0)
         result = self._run_main(ledger, signal, 90000.0)
         self.assertIsNone(result["position"])
 
-    def test_rr_at_minimum_opens_trade(self):
-        """Signal with R:R = 2.0 exactly should open a position."""
+    def test_sliding_rr_mid_confidence_passes_at_1_5(self):
+        """75-84% confidence passes at exactly 1.5:1."""
         ledger = make_ledger(capital=10000.0)
-        # support=85000, resistance=100000 -> risk=5000, reward=10000 -> R:R=2.0
-        signal = make_signal(sig="BUY", confidence=80, price=90000.0,
-                             support=85000.0, resistance=100000.0)
+        # risk=2000, reward=3000 -> R:R=1.5, confidence=78 -> min 1.5 -> PASS
+        signal = make_signal(sig="BUY", confidence=78, price=90000.0,
+                             support=88000.0, resistance=93000.0)
         result = self._run_main(ledger, signal, 90000.0)
         self.assertIsNotNone(result["position"])
 
-    def test_rr_above_minimum_opens_trade(self):
-        """Signal with R:R > 2 should open a position."""
+    def test_sliding_rr_low_confidence_needs_2(self):
+        """65-74% confidence needs 2:1 R:R."""
         ledger = make_ledger(capital=10000.0)
-        # support=88000, resistance=100000 -> risk=2000, reward=10000 -> R:R=5.0
-        signal = make_signal(sig="BUY", confidence=80, price=90000.0,
-                             support=88000.0, resistance=100000.0)
+        # risk=2000, reward=3000 -> R:R=1.5, confidence=68 -> min 2.0 -> REJECT
+        signal = make_signal(sig="BUY", confidence=68, price=90000.0,
+                             support=88000.0, resistance=93000.0)
         result = self._run_main(ledger, signal, 90000.0)
-        self.assertIsNotNone(result["position"])
+        self.assertIsNone(result["position"])
+
+    def test_below_1_to_1_always_rejected(self):
+        """Even at 95% confidence, R:R below 1:1 is rejected."""
+        ledger = make_ledger(capital=10000.0)
+        # risk=5000, reward=2000 -> R:R=0.4
+        signal = make_signal(sig="BUY", confidence=95, price=90000.0,
+                             support=85000.0, resistance=92000.0)
+        result = self._run_main(ledger, signal, 90000.0)
+        self.assertIsNone(result["position"])
 
     def test_zero_risk_rejects(self):
-        """If price == support, risk is zero, should not trade."""
         risk, reward, rr, sl, tp = trade.compute_rr(85000.0,
             make_signal(support=85000.0, resistance=95000.0))
         self.assertEqual(rr, 0)
 
     def test_zero_reward_rejects(self):
-        """If price == resistance, reward is zero, should not trade."""
         risk, reward, rr, sl, tp = trade.compute_rr(95000.0,
             make_signal(support=85000.0, resistance=95000.0))
         self.assertEqual(rr, 0)
+
+    def test_min_rr_for_confidence_tiers(self):
+        self.assertEqual(trade.min_rr_for_confidence(90), 1.0)
+        self.assertEqual(trade.min_rr_for_confidence(85), 1.0)
+        self.assertEqual(trade.min_rr_for_confidence(80), 1.5)
+        self.assertEqual(trade.min_rr_for_confidence(75), 1.5)
+        self.assertEqual(trade.min_rr_for_confidence(70), 2.0)
+        self.assertEqual(trade.min_rr_for_confidence(65), 2.0)
 
     def _run_main(self, ledger_data, signal_data, current_price):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
