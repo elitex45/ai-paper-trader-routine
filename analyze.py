@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-BTC AI Analyst — fetches OHLCV data, computes TA indicators,
-asks Claude for a structured buy/sell/hold signal, and writes it to ledger.json.
+BTC AI Analyst — fetches OHLCV data from Binance public API,
+computes TA indicators, asks Claude for a structured buy/sell/hold signal,
+and writes it to ledger.json.
 """
 
 import json
@@ -19,43 +20,35 @@ from dotenv import load_dotenv
 load_dotenv()
 
 LEDGER_PATH = os.path.join(os.path.dirname(__file__), "ledger.json")
-COINGECKO_BASE = "https://api.coingecko.com/api/v3"
+BINANCE_BASE = "https://api.binance.com/api/v3"
 
 
-def fetch_ohlcv(days: int = 30) -> pd.DataFrame:
-    """Fetch daily OHLCV from CoinGecko (no auth required)."""
-    url = f"{COINGECKO_BASE}/coins/bitcoin/ohlc"
-    params = {"vs_currency": "usd", "days": days}
+def fetch_klines(interval: str = "4h", limit: int = 100) -> pd.DataFrame:
+    """Fetch OHLCV klines from Binance public API (no auth required)."""
+    url = f"{BINANCE_BASE}/klines"
+    params = {"symbol": "BTCUSDT", "interval": interval, "limit": limit}
     resp = requests.get(url, params=params, timeout=15)
     resp.raise_for_status()
     data = resp.json()
-    df = pd.DataFrame(data, columns=["timestamp", "open", "high", "low", "close"])
+    df = pd.DataFrame(data, columns=[
+        "timestamp", "open", "high", "low", "close", "volume",
+        "close_time", "quote_volume", "trade_count",
+        "taker_buy_base", "taker_buy_quote", "unused",
+    ])
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-    df = df.sort_values("timestamp").reset_index(drop=True)
-    return df
+    for col in ["open", "high", "low", "close", "volume"]:
+        df[col] = df[col].astype(float)
+    df = df[["timestamp", "open", "high", "low", "close", "volume"]]
+    return df.sort_values("timestamp").reset_index(drop=True)
 
 
 def fetch_current_price() -> float:
-    """Fetch current BTC spot price."""
-    url = f"{COINGECKO_BASE}/simple/price"
-    params = {"ids": "bitcoin", "vs_currencies": "usd"}
+    """Fetch current BTC/USDT spot price from Binance."""
+    url = f"{BINANCE_BASE}/ticker/price"
+    params = {"symbol": "BTCUSDT"}
     resp = requests.get(url, params=params, timeout=10)
     resp.raise_for_status()
-    return float(resp.json()["bitcoin"]["usd"])
-
-
-def fetch_volume_data(days: int = 30) -> pd.DataFrame:
-    """Fetch daily volume via market_chart endpoint."""
-    url = f"{COINGECKO_BASE}/coins/bitcoin/market_chart"
-    params = {"vs_currency": "usd", "days": days, "interval": "daily"}
-    resp = requests.get(url, params=params, timeout=15)
-    resp.raise_for_status()
-    data = resp.json()
-    volumes = data.get("total_volumes", [])
-    df = pd.DataFrame(volumes, columns=["timestamp", "volume"])
-    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-    df = df.sort_values("timestamp").reset_index(drop=True)
-    return df
+    return float(resp.json()["price"])
 
 
 def compute_indicators(df: pd.DataFrame) -> dict:
@@ -98,10 +91,15 @@ def save_ledger(ledger: dict):
         json.dump(ledger, f, indent=2)
 
 
-def build_prompt(price: float, df: pd.DataFrame, indicators: dict, vol_ratio: float, position) -> str:
-    last_7 = df.tail(7)[["timestamp", "open", "high", "low", "close"]].copy()
-    last_7["timestamp"] = last_7["timestamp"].dt.strftime("%Y-%m-%d")
-    candles_str = last_7.to_string(index=False)
+def build_prompt(price: float, df_4h: pd.DataFrame, df_1d: pd.DataFrame,
+                 indicators_4h: dict, indicators_1d: dict, vol_ratio: float, position) -> str:
+    last_7_daily = df_1d.tail(7)[["timestamp", "open", "high", "low", "close", "volume"]].copy()
+    last_7_daily["timestamp"] = last_7_daily["timestamp"].dt.strftime("%Y-%m-%d")
+    daily_str = last_7_daily.to_string(index=False)
+
+    last_12_4h = df_4h.tail(12)[["timestamp", "open", "high", "low", "close", "volume"]].copy()
+    last_12_4h["timestamp"] = last_12_4h["timestamp"].dt.strftime("%Y-%m-%d %H:%M")
+    h4_str = last_12_4h.to_string(index=False)
 
     pos_str = "None (flat)"
     if position:
@@ -109,20 +107,29 @@ def build_prompt(price: float, df: pd.DataFrame, indicators: dict, vol_ratio: fl
         unreal = round((price - entry) / entry * 100, 2)
         pos_str = f"LONG @ ${entry:,.2f} (unrealized: {unreal:+.2f}%)"
 
-    return f"""You are a professional crypto technical analyst. Analyze the following BTC/USD market data and provide a trading signal for the next 1-3 days.
+    return f"""You are a professional crypto technical analyst. Analyze the following BTC/USDT market data and provide a trading signal for the next 1-3 days.
 
 CURRENT PRICE: ${price:,.2f}
 TIMESTAMP: {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}
 
-LAST 7 DAILY CANDLES (OHLCV):
-{candles_str}
+LAST 7 DAILY CANDLES:
+{daily_str}
 
-CURRENT INDICATORS:
-- RSI(14): {indicators['rsi']} {"[OVERSOLD]" if indicators['rsi'] < 30 else "[OVERBOUGHT]" if indicators['rsi'] > 70 else ""}
-- MACD: {indicators['macd_value']}, Signal: {indicators['macd_signal']}, Histogram: {indicators['macd_hist']} {"[BULLISH CROSS]" if indicators['macd_hist'] > 0 else "[BEARISH CROSS]"}
-- Bollinger Bands: Upper={indicators['bb_upper']:,.2f}, Mid={indicators['bb_mid']:,.2f}, Lower={indicators['bb_lower']:,.2f}
-- EMA9: {indicators['ema9']:,.2f}, EMA21: {indicators['ema21']:,.2f} {"[EMA BULLISH]" if indicators['ema9'] > indicators['ema21'] else "[EMA BEARISH]"}
-- Volume vs 20d average: {vol_ratio:.2f}x
+LAST 12 FOUR-HOUR CANDLES:
+{h4_str}
+
+DAILY TIMEFRAME INDICATORS:
+- RSI(14): {indicators_1d['rsi']} {"[OVERSOLD]" if indicators_1d['rsi'] < 30 else "[OVERBOUGHT]" if indicators_1d['rsi'] > 70 else ""}
+- MACD: {indicators_1d['macd_value']}, Signal: {indicators_1d['macd_signal']}, Histogram: {indicators_1d['macd_hist']}
+- Bollinger Bands: Upper={indicators_1d['bb_upper']:,.2f}, Mid={indicators_1d['bb_mid']:,.2f}, Lower={indicators_1d['bb_lower']:,.2f}
+- EMA9: {indicators_1d['ema9']:,.2f}, EMA21: {indicators_1d['ema21']:,.2f} {"[EMA BULLISH]" if indicators_1d['ema9'] > indicators_1d['ema21'] else "[EMA BEARISH]"}
+
+4-HOUR TIMEFRAME INDICATORS:
+- RSI(14): {indicators_4h['rsi']} {"[OVERSOLD]" if indicators_4h['rsi'] < 30 else "[OVERBOUGHT]" if indicators_4h['rsi'] > 70 else ""}
+- MACD: {indicators_4h['macd_value']}, Signal: {indicators_4h['macd_signal']}, Histogram: {indicators_4h['macd_hist']} {"[BULLISH CROSS]" if indicators_4h['macd_hist'] > 0 else "[BEARISH CROSS]"}
+- Bollinger Bands: Upper={indicators_4h['bb_upper']:,.2f}, Mid={indicators_4h['bb_mid']:,.2f}, Lower={indicators_4h['bb_lower']:,.2f}
+- EMA9: {indicators_4h['ema9']:,.2f}, EMA21: {indicators_4h['ema21']:,.2f} {"[EMA BULLISH]" if indicators_4h['ema9'] > indicators_4h['ema21'] else "[EMA BEARISH]"}
+- Volume vs 20-period average: {vol_ratio:.2f}x
 
 CURRENT PAPER POSITION: {pos_str}
 
@@ -148,7 +155,6 @@ def call_claude(prompt: str) -> dict:
         messages=[{"role": "user", "content": prompt}],
     )
     raw = message.content[0].text.strip()
-    # Strip any accidental markdown fences
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
@@ -159,34 +165,27 @@ def call_claude(prompt: str) -> dict:
 def main():
     print(f"[{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}] BTC Analyst running...")
 
-    # Fetch data with a small delay between calls to respect rate limits
-    print("Fetching OHLCV data...")
-    df = fetch_ohlcv(days=30)
-    time.sleep(1)
+    print("Fetching 4h klines (100 candles = ~16 days)...")
+    df_4h = fetch_klines(interval="4h", limit=100)
+
+    print("Fetching daily klines (60 candles)...")
+    df_1d = fetch_klines(interval="1d", limit=60)
 
     print("Fetching current price...")
     price = fetch_current_price()
-    time.sleep(1)
 
-    print("Fetching volume data...")
-    vol_df = fetch_volume_data(days=21)
-
-    # Merge volume into OHLCV df
-    df = df.merge(vol_df, on="timestamp", how="left")
-    df["volume"] = df["volume"].fillna(0)
-
-    # Volume ratio: current vs 20-day avg
-    vol_sma20 = df["volume"].rolling(20).mean().iloc[-1]
-    vol_ratio = df["volume"].iloc[-1] / vol_sma20 if vol_sma20 > 0 else 1.0
+    vol_sma20 = df_4h["volume"].rolling(20).mean().iloc[-1]
+    vol_ratio = df_4h["volume"].iloc[-1] / vol_sma20 if vol_sma20 > 0 else 1.0
 
     print("Computing indicators...")
-    indicators = compute_indicators(df)
+    indicators_4h = compute_indicators(df_4h)
+    indicators_1d = compute_indicators(df_1d)
 
     ledger = load_ledger()
     position = ledger.get("position")
 
     print("Calling Claude for analysis...")
-    prompt = build_prompt(price, df, indicators, vol_ratio, position)
+    prompt = build_prompt(price, df_4h, df_1d, indicators_4h, indicators_1d, vol_ratio, position)
     signal = call_claude(prompt)
     signal["price_at_signal"] = price
     signal["timestamp"] = datetime.now(timezone.utc).isoformat()

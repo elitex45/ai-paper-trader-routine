@@ -18,10 +18,10 @@ STARTING_CAPITAL = 10000.0
 
 def fetch_current_price() -> float:
     try:
-        url = "https://api.coingecko.com/api/v3/simple/price"
-        resp = requests.get(url, params={"ids": "bitcoin", "vs_currencies": "usd"}, timeout=8)
+        url = "https://api.binance.com/api/v3/ticker/price"
+        resp = requests.get(url, params={"symbol": "BTCUSDT"}, timeout=8)
         resp.raise_for_status()
-        return float(resp.json()["bitcoin"]["usd"])
+        return float(resp.json()["price"])
     except Exception:
         return None
 

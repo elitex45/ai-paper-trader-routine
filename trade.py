@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 LEDGER_PATH = os.path.join(os.path.dirname(__file__), "ledger.json")
-COINGECKO_BASE = "https://api.coingecko.com/api/v3"
+BINANCE_BASE = "https://api.binance.com/api/v3"
 
 POSITION_SIZE_PCT = 0.50   # Use 50% of capital per trade
 STOP_LOSS_PCT = 0.05       # Close if price falls 5% from entry
@@ -25,11 +25,11 @@ SELL_CONFIDENCE_MIN = 60   # Minimum confidence to close on SELL signal
 
 
 def fetch_current_price() -> float:
-    url = f"{COINGECKO_BASE}/simple/price"
-    params = {"ids": "bitcoin", "vs_currencies": "usd"}
+    url = f"{BINANCE_BASE}/ticker/price"
+    params = {"symbol": "BTCUSDT"}
     resp = requests.get(url, params=params, timeout=10)
     resp.raise_for_status()
-    return float(resp.json()["bitcoin"]["usd"])
+    return float(resp.json()["price"])
 
 
 def load_ledger() -> dict:
